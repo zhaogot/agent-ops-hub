@@ -1,0 +1,77 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: agent-ops-hub
+
+# 多Agent运营系统配置
+agent-ops:
+  # 事件总线配置
+  event-bus:
+    # 异步事件处理线程池大小
+    thread-pool-size: 8
+    # 事件队列容量
+    queue-capacity: 10000
+
+  # Agent配置
+  agents:
+    # 客服Agent
+    customer-service:
+      enabled: true
+      max-concurrent-tasks: 10
+      auto-reply-enabled: true
+      # 智能回复置信度阈值
+      confidence-threshold: 0.75
+      # 需要人工介入的情绪关键词
+      escalation-keywords: 投诉,退款,差评,举报,消协,工商,315
+      # 自动回复模板
+      reply-templates:
+        greeting: "您好，欢迎光临！有什么可以帮您的吗？"
+        order-query: "正在为您查询订单信息，请稍候..."
+        refund-processing: "已为您提交退款申请，预计1-3个工作日到账。"
+
+    # 营销Agent
+    marketing:
+      enabled: true
+      max-concurrent-tasks: 5
+      # 优惠券策略
+      coupon-strategy:
+        new-user-discount: 20
+        repeat-buyer-discount: 10
+        churn-risk-discount: 30
+      # 营销活动时间窗口
+      campaign-hours:
+        start: 8
+        end: 22
+
+    # 运营Agent
+    operations:
+      enabled: true
+      max-concurrent-tasks: 8
+      # 库存预警阈值
+      stock-warning-threshold: 50
+      # 自动补货阈值
+      auto-reorder-threshold: 20
+      # 价格监控波动百分比
+      price-fluctuation-percent: 10
+
+    # 监控Agent
+    monitoring:
+      enabled: true
+      max-concurrent-tasks: 5
+      # 健康检查间隔(秒)
+      health-check-interval: 60
+      # 异常检测窗口(分钟)
+      anomaly-detection-window: 30
+      # 告警通知方式
+      alert-channels:
+        - LOG
+        - WEBHOOK
+
+logging:
+  level:
+    com.ecommerce.agentops: DEBUG
+    com.ecommerce.agentops.event: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level [%X{agentId}] %logger{36} - %msg%n"
