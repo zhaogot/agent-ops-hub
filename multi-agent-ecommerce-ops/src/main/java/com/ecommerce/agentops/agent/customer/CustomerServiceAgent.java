@@ -1,6 +1,8 @@
 package com.ecommerce.agentops.agent.customer;
 
 import com.ecommerce.agentops.agent.core.BaseAgent;
+import com.ecommerce.agentops.agent.core.LlmReasoningService;
+import com.ecommerce.agentops.agent.core.LlmReasoningService.CustomerServiceReasoning;
 import com.ecommerce.agentops.event.BaseEvent;
 import com.ecommerce.agentops.event.DomainEvents;
 import com.ecommerce.agentops.event.EventBus;
@@ -39,8 +41,12 @@ public class CustomerServiceAgent extends BaseAgent {
             "投诉", "退款", "差评", "举报", "消协", "工商", "315", "律师", "起诉"
     );
 
-    public CustomerServiceAgent(EventBus eventBus) {
+    /** LLM推理服务 */
+    private final LlmReasoningService llmReasoningService;
+
+    public CustomerServiceAgent(EventBus eventBus, LlmReasoningService llmReasoningService) {
         super(eventBus);
+        this.llmReasoningService = llmReasoningService;
         initResponseTemplates();
     }
 
@@ -94,7 +100,10 @@ public class CustomerServiceAgent extends BaseAgent {
     }
 
     /**
-     * 处理客户咨询 - 核心自动回复逻辑
+     * 处理客户咨询 - LLM长链推理 + 规则引擎guardrail
+     *
+     * 推理链路: 意图识别 → 情绪分析 → 升级判断 → 回复生成 → 动作执行
+     * LLM失败时自动降级到规则引擎
      */
     private void handleInquiry(BaseEvent event) {
         String sessionId = event.getPayload("sessionId");
@@ -121,18 +130,71 @@ public class CustomerServiceAgent extends BaseAgent {
                 .timestamp(LocalDateTime.now())
                 .build());
 
-        // 情绪分析
-        CustomerSession.CustomerSentiment sentiment = analyzeSentiment(message);
+        // ========== 尝试LLM长链推理 ==========
+        CustomerSession.CustomerSentiment sentiment;
+        String reply;
+        boolean needsEscalation = false;
+        List<Map<String, Object>> actions = null;
+
+        try {
+            Map<String, Object> contextInfo = Map.of(
+                    "sessionId", sessionId,
+                    "orderHistory", session.getOrderId() != null ? session.getOrderId() : "无",
+                    "previousMessages", session.getMessages().size()
+            );
+
+            CustomerServiceReasoning reasoning = llmReasoningService.reasonCustomerService(
+                    message, userId, contextInfo);
+
+            if (reasoning != null) {
+                // LLM推理成功 - 使用LLM结果
+                sentiment = parseSentiment(reasoning.getSentiment());
+                reply = reasoning.getReply();
+                needsEscalation = reasoning.isNeedsEscalation();
+                actions = reasoning.getActions();
+                log.info("LLM推理成功: intent={}, sentiment={}, confidence={}",
+                        reasoning.getIntent(), reasoning.getSentiment(), reasoning.getConfidence());
+            } else {
+                // LLM返回null - 降级到规则引擎
+                log.info("LLM返回null，降级到规则引擎");
+                sentiment = analyzeSentiment(message);
+                needsEscalation = shouldEscalate(message, sentiment);
+                reply = generateReply(message, session);
+            }
+        } catch (Exception e) {
+            // LLM异常 - 降级到规则引擎 (guardrail)
+            log.warn("LLM推理异常，降级到规则引擎: {}", e.getMessage());
+            sentiment = analyzeSentiment(message);
+            needsEscalation = shouldEscalate(message, sentiment);
+            reply = generateReply(message, session);
+        }
+
+        // ========== Guardrail: 安全边界检查 ==========
+        // 无论LLM还是规则引擎，都必须通过的安全检查
+        if (sentiment == CustomerSession.CustomerSentiment.ANGRY && !needsEscalation) {
+            // 安全兜底: 愤怒情绪必须升级（防止LLM漏判）
+            needsEscalation = true;
+            log.warn("Guardrail触发: 愤怒情绪未被标记升级，强制升级");
+        }
+        if (escalationKeywords.stream().anyMatch(message::contains) && !needsEscalation) {
+            needsEscalation = true;
+            log.warn("Guardrail触发: 升级关键词未被识别，强制升级");
+        }
+
         session.setSentiment(sentiment);
 
-        // 检查是否需要升级
-        if (shouldEscalate(message, sentiment)) {
+        // ========== 执行决策 ==========
+        if (needsEscalation) {
             escalateToHuman(session, message, sentiment);
             return;
         }
 
-        // 智能回复
-        String reply = generateReply(message, session);
+        // 执行LLM返回的动作（如发券）
+        if (actions != null) {
+            executeActions(actions, userId);
+        }
+
+        // 记录回复
         session.getMessages().add(ChatMessage.builder()
                 .role("AGENT")
                 .content(reply)
@@ -326,7 +388,48 @@ public class CustomerServiceAgent extends BaseAgent {
 
     @Override
     protected void onStart() {
-        log.info("客服Agent初始化完成，回复模板{}个", keywordResponses.size());
+        log.info("客服Agent初始化完成，回复模板{}个，LLM推理已启用", keywordResponses.size());
+    }
+
+    /**
+     * 将LLM返回的情绪字符串转换为枚举
+     */
+    private CustomerSession.CustomerSentiment parseSentiment(String sentiment) {
+        if (sentiment == null) return CustomerSession.CustomerSentiment.NEUTRAL;
+        try {
+            return CustomerSession.CustomerSentiment.valueOf(sentiment.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return CustomerSession.CustomerSentiment.NEUTRAL;
+        }
+    }
+
+    /**
+     * 执行LLM返回的动作列表
+     */
+    private void executeActions(List<Map<String, Object>> actions, String userId) {
+        for (Map<String, Object> action : actions) {
+            String type = (String) action.get("type");
+            if (type == null) continue;
+
+            switch (type) {
+                case "ISSUE_COUPON" -> {
+                    Object amountObj = action.getOrDefault("params", action).toString().contains("amount")
+                            ? ((Map<?, ?>) action.getOrDefault("params", action)).get("amount") : 10;
+                    int amount = amountObj instanceof Number ? ((Number) amountObj).intValue() : 10;
+                    BaseEvent couponEvent = createEvent(DomainEvents.COUPON_ISSUED,
+                            "marketing-agent", BaseEvent.EventPriority.NORMAL);
+                    couponEvent.withPayload("userId", userId)
+                            .withPayload("reason", "LLM_RECOMMENDED")
+                            .withPayload("discountAmount", amount);
+                    context.publishEvent(couponEvent);
+                    log.info("LLM推荐动作: 发放{}元优惠券给用户{}", amount, userId);
+                }
+                case "ESCALATE_TO_HUMAN" -> {
+                    log.info("LLM推荐动作: 转人工客服");
+                }
+                default -> log.debug("未识别的LLM动作: {}", type);
+            }
+        }
     }
 
     @Override

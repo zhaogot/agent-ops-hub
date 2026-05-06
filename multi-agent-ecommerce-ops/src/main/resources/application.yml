@@ -5,6 +5,24 @@ spring:
   application:
     name: agent-ops-hub
 
+  # Spring AI 配置 - OpenAI兼容协议
+  # 可对接: OpenAI / DeepSeek / 通义千问 / 智谱 / Moonshot / Ollama
+  ai:
+    openai:
+      api-key: ${AI_API_KEY:sk-your-api-key-here}
+      base-url: ${AI_BASE_URL:https://api.openai.com}
+      chat:
+        options:
+          model: ${AI_MODEL:gpt-4o-mini}
+          temperature: 0.3
+          max-tokens: 1024
+
+  # 推荐配置示例:
+  # DeepSeek:   base-url=https://api.deepseek.com  model=deepseek-chat
+  # 通义千问:    base-url=https://dashscope.aliyuncs.com/compatible-mode  model=qwen-plus
+  # 智谱:       base-url=https://open.bigmodel.cn/api/paas/v4  model=glm-4-flash
+  # Ollama:     base-url=http://localhost:11434  model=qwen2.5:7b
+
 # 多Agent运营系统配置
 agent-ops:
   # 事件总线配置
